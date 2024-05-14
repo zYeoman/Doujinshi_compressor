@@ -1,49 +1,269 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
+	"flag"
 	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"syscall"
+
+	"github.com/chai2010/webp"
+	"github.com/nfnt/resize"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 )
 
-func readFiles(filename string, wg *sync.WaitGroup, ch chan int) {
+var (
+	format   = flag.String("format", "webp", "Output format: webp, jpg, or png")
+	quality  = flag.Float64("quality", 75, "Output quality for WebP and JPG (1-100)")
+	maxWidth = flag.Uint("max-width", 1080, "Maximum width of the output images (0 for no resizing)")
+)
+
+func isImageFile(fileName string) bool {
+	// 简单地检查文件扩展名
+	ext := strings.ToLower(filepath.Ext(fileName))
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
+}
+
+type ImageInfo struct {
+	Name  string
+	Size  int
+	Image image.Image
+}
+type BytesInfo struct {
+	Name     string
+	Size     int
+	ImageBuf bytes.Buffer
+}
+
+func readFiles(dirPath string, wg *sync.WaitGroup, ch chan ImageInfo) {
 	defer wg.Done()
-	fmt.Printf("%s\n", filename)
-	for i := 0; i < 20; i++ {
-		ch <- i
+	// 获取目录下的所有文件
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		fmt.Printf("\nopen %s failed\n", dirPath)
+		return
+	}
+	for _, file := range files {
+		if !file.IsDir() {
+			// 检查文件是否为图片
+			if isImageFile(file.Name()) {
+				// 构建源文件和目标文件的路径
+				srcFilePath := filepath.Join(dirPath, file.Name())
+				baseFileName := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
+				// 打开源文件
+				srcFile, err := os.Open(srcFilePath)
+				if err != nil {
+					fmt.Printf("\nopen %s failed\n", srcFilePath)
+					continue
+				}
+				defer srcFile.Close()
+
+				fileInfo, err := srcFile.Stat()
+				if err != nil {
+					fmt.Printf("\nstate %s failed\n", srcFilePath)
+					continue
+				}
+				srcSize := fileInfo.Size()
+
+				// 解码图片
+				img, _, err := image.Decode(srcFile)
+				if err != nil {
+					fmt.Printf("\ndecode %s failed\n", srcFilePath)
+					continue
+				}
+				ch <- ImageInfo{baseFileName, int(srcSize), img}
+			}
+		}
 	}
 }
-func encodeFiles(id int, wg *sync.WaitGroup, ch chan int, outch chan int) {
+func encodeFiles(maxWidth uint, outputFormat string, quality float64, wg *sync.WaitGroup, inch chan ImageInfo, outch chan BytesInfo) {
 	defer wg.Done()
-	for item := range ch {
-		fmt.Printf("thread %d run %d\n", id, item)
-		outch <- item
+	for image_info := range inch {
+		var buf bytes.Buffer
+		img := image_info.Image
+		// 如果设置了最大宽度，则调整图片大小
+		if maxWidth > 0 && uint(img.Bounds().Dx()) > maxWidth {
+			img = resize.Resize(maxWidth, 0, img, resize.Lanczos3)
+		}
+
+		var err error = nil
+		// 根据输出格式进行转换
+		switch outputFormat {
+		case "webp":
+			err = webp.Encode(&buf, img, &webp.Options{Quality: float32(quality)})
+		case "jpg", "jpeg":
+			err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: int(quality)})
+		case "png":
+			err = png.Encode(&buf, img)
+		case "gif":
+			err = gif.Encode(&buf, img, &gif.Options{NumColors: 256})
+		default:
+			err = fmt.Errorf("unsupported output format: %s", outputFormat)
+		}
+		if err != nil {
+			fmt.Printf("\nfile %s format %s fail %v\n", image_info.Name, outputFormat, err)
+		}
+		outch <- BytesInfo{image_info.Name, image_info.Size, buf}
 	}
 }
-func writeFiles(filename string, wg *sync.WaitGroup, ch chan int) {
+
+func interruptHandler(zipWriter *zip.Writer) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// 启动一个goroutine来监听信号
+	go func() {
+		<-sigChan
+		fmt.Println("\nInterrupt signal received. Closing ZIP writer...")
+		err := zipWriter.Flush()
+		if err != nil {
+			fmt.Println("Error flush ZIP writer:", err)
+		}
+		// 关闭zip writer
+		err = zipWriter.Close()
+		if err != nil {
+			fmt.Println("Error closing ZIP writer:", err)
+		}
+		fmt.Println("ZIP writer closed. Exiting...")
+		os.Exit(0)
+	}()
+}
+
+type Logger struct {
+	total               int
+	processed           int
+	totalFileSize       int
+	totalCompressedSize int
+}
+
+func (l *Logger) Add(item *BytesInfo) {
+	l.processed++
+	l.totalFileSize += item.Size
+	l.totalCompressedSize += item.ImageBuf.Len()
+	percent := float64(l.processed) / float64(l.total) * 100
+	compress_percent := float64(l.totalCompressedSize) / float64(l.totalFileSize) * 100
+	fmt.Printf("\r%d/%d 压缩率 %.2f 进度: [%-50s] %.2f%%", l.totalCompressedSize, l.totalFileSize, compress_percent, bar(percent, 50), percent)
+}
+
+func writeFiles(zipFileName string, totalFileNum int, wg *sync.WaitGroup, ch chan BytesInfo) {
 	defer wg.Done()
-	fmt.Printf("%s\n", filename)
+	zipFile, err := os.Create(zipFileName)
+	if err != nil {
+		fmt.Printf("\nopen %s fail:%v\n", zipFileName, err)
+		os.Exit(-1)
+	}
+	defer zipFile.Close()
+	zipWriter := zip.NewWriter(zipFile)
+	interruptHandler(zipWriter)
+	defer zipWriter.Close()
+	logger := Logger{totalFileNum, 0, 0, 0}
 	for item := range ch {
-		fmt.Printf("thread %s run %d\n", filename, item)
+		logger.Add(&item)
+		writer, err := zipWriter.Create(item.Name)
+		if err != nil {
+			fmt.Printf("\nwriter %s fail:%v\n", zipFileName, err)
+			os.Exit(-1)
+		}
+		_, err = item.ImageBuf.WriteTo(writer)
+		if err != nil {
+			fmt.Printf("\nimage write %s fail:%v\n", zipFileName, err)
+			os.Exit(-1)
+		}
 	}
 }
 
 func main() {
+	flag.Parse()
+
+	// 获取当前目录
+	currentDir, err := os.Getwd()
+	if err != nil {
+		fmt.Println("获取当前目录失败:", err)
+		return
+	}
+	// 读取当前目录下的所有文件和文件夹
+	entries, err := os.ReadDir(currentDir)
+	if err != nil {
+		fmt.Println("读取目录失败:", err)
+		return
+	}
+	// 遍历一级子目录
+	for _, entry := range entries {
+		if entry.IsDir() {
+			path := entry.Name()
+			err := processDirectory(path, currentDir, runtime.NumCPU())
+			if err != nil {
+				fmt.Printf("处理目录 %s 失败: %v\n", path, err)
+			}
+		}
+	}
+}
+func totalImageFileNum(dirPath string) int {
+	numTotalImageFile := 0
+	// 获取目录下的所有文件
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		return 0
+	}
+	for _, file := range files {
+		if !file.IsDir() {
+			// 检查文件是否为图片
+			if isImageFile(file.Name()) {
+				numTotalImageFile++
+			}
+		}
+	}
+	return numTotalImageFile
+}
+func processDirectory(dirPath string, root string, concurrency int) error {
+	dirName := filepath.Base(dirPath)
+	fmt.Printf("开始转换 %s\n", dirName)
+	totalFileNum := totalImageFileNum(dirPath)
+	if totalFileNum == 0 {
+		fmt.Printf("%s 没有图片\n", dirName)
+		return nil
+	}
 	wgRead := &sync.WaitGroup{}
 	wgEncode := &sync.WaitGroup{}
 	wgWrite := &sync.WaitGroup{}
-	readEncodeCh := make(chan int, 8)
-	encodeWriteCh := make(chan int, 8)
+	readEncodeCh := make(chan ImageInfo, concurrency)
+	encodeWriteCh := make(chan BytesInfo, concurrency)
 	wgRead.Add(1)
-	go readFiles("hello", wgRead, readEncodeCh)
-	for i := 0; i < 8; i++ {
+	go readFiles(dirPath, wgRead, readEncodeCh)
+	for i := 0; i < concurrency; i++ {
 		wgEncode.Add(1)
-		go encodeFiles(i, wgEncode, readEncodeCh, encodeWriteCh)
+		go encodeFiles(*maxWidth, *format, *quality, wgEncode, readEncodeCh, encodeWriteCh)
 	}
 	wgWrite.Add(1)
-	go writeFiles("hi", wgWrite, encodeWriteCh)
+	zipFileName := filepath.Join(root, fmt.Sprintf("%s.zip", dirName))
+	go writeFiles(zipFileName, totalFileNum, wgWrite, encodeWriteCh)
 	wgRead.Wait()
 	close(readEncodeCh)
 	wgEncode.Wait()
 	close(encodeWriteCh)
 	wgWrite.Wait()
+	fmt.Println("\n压缩完成。")
+	return nil
+}
+
+// bar 返回一个表示进度的字符串条
+func bar(percent float64, width int) string {
+	full := int(percent/100*float64(width)) - 1
+	var b bytes.Buffer
+	for i := 0; i < full; i++ {
+		b.WriteString("=")
+	}
+	b.WriteString(">")
+	for i := full + 1; i < width; i++ {
+		b.WriteString(" ")
+	}
+	return b.String()
 }
