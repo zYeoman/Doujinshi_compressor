@@ -1,4 +1,4 @@
-module main
+module doujinshi_compressor
 
 go 1.21.3
 
