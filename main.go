@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/chai2010/webp"
 	"github.com/nfnt/resize"
@@ -139,9 +140,30 @@ func interruptHandler(zipWriter *zip.Writer) {
 
 type Logger struct {
 	total               int
+	startTime           time.Time
 	processed           int
 	totalFileSize       int
 	totalCompressedSize int
+}
+
+// byteCountSI 将字节数转换为KiB或MiB格式，使用国际单位制（SI）前缀
+func byteCountSI(b int) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB",
+		float64(b)/float64(div), "KM"[exp])
+}
+
+func NewLogger(total int, filename string) *Logger {
+	fmt.Printf("处理 %s\n", filename)
+	return &Logger{total, time.Now(), 0, 0, 0}
 }
 
 func (l *Logger) Add(item *BytesInfo) {
@@ -150,34 +172,34 @@ func (l *Logger) Add(item *BytesInfo) {
 	l.totalCompressedSize += item.ImageBuf.Len()
 	percent := float64(l.processed) / float64(l.total) * 100
 	compress_percent := float64(l.totalCompressedSize) / float64(l.totalFileSize) * 100
-	fmt.Printf("\r%d/%d 压缩率 %.2f 进度: [%-50s] %.2f%%", l.totalCompressedSize, l.totalFileSize, compress_percent, bar(percent, 50), percent)
+	fmt.Printf("\r压缩率 %4.2f 进度: [%-50s] %.2f%% %10s/%s", compress_percent, bar(percent, 50), percent, byteCountSI(l.totalCompressedSize), byteCountSI(l.totalFileSize))
 }
 
-func writeFiles(zipFileName string, totalFileNum int, wg *sync.WaitGroup, ch chan BytesInfo) {
+func writeFiles(root string, dirName string, totalFileNum int, wg *sync.WaitGroup, ch chan BytesInfo) {
 	defer wg.Done()
+	zipFileName := filepath.Join(root, fmt.Sprintf("%s.zip", dirName))
 	zipFile, err := os.Create(zipFileName)
 	if err != nil {
 		fmt.Printf("\nopen %s fail:%v\n", zipFileName, err)
-		os.Exit(-1)
+		return
 	}
 	defer zipFile.Close()
 	zipWriter := zip.NewWriter(zipFile)
 	interruptHandler(zipWriter)
 	defer zipWriter.Close()
-	logger := Logger{totalFileNum, 0, 0, 0}
+	logger := NewLogger(totalFileNum, dirName)
 	for item := range ch {
 		logger.Add(&item)
 		writer, err := zipWriter.Create(item.Name)
 		if err != nil {
 			fmt.Printf("\nwriter %s fail:%v\n", zipFileName, err)
-			os.Exit(-1)
 		}
 		_, err = item.ImageBuf.WriteTo(writer)
 		if err != nil {
 			fmt.Printf("\nimage write %s fail:%v\n", zipFileName, err)
-			os.Exit(-1)
 		}
 	}
+	fmt.Printf("\n")
 }
 
 func main() {
@@ -225,10 +247,8 @@ func totalImageFileNum(dirPath string) int {
 }
 func processDirectory(dirPath string, root string, concurrency int) error {
 	dirName := filepath.Base(dirPath)
-	fmt.Printf("开始转换 %s\n", dirName)
 	totalFileNum := totalImageFileNum(dirPath)
 	if totalFileNum == 0 {
-		fmt.Printf("%s 没有图片\n", dirName)
 		return nil
 	}
 	wgRead := &sync.WaitGroup{}
@@ -243,14 +263,12 @@ func processDirectory(dirPath string, root string, concurrency int) error {
 		go encodeFiles(*maxWidth, *format, *quality, wgEncode, readEncodeCh, encodeWriteCh)
 	}
 	wgWrite.Add(1)
-	zipFileName := filepath.Join(root, fmt.Sprintf("%s.zip", dirName))
-	go writeFiles(zipFileName, totalFileNum, wgWrite, encodeWriteCh)
+	go writeFiles(root, dirName, totalFileNum, wgWrite, encodeWriteCh)
 	wgRead.Wait()
 	close(readEncodeCh)
 	wgEncode.Wait()
 	close(encodeWriteCh)
 	wgWrite.Wait()
-	fmt.Println("\n压缩完成。")
 	return nil
 }
 
