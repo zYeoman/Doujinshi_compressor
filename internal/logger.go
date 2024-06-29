@@ -40,7 +40,7 @@ func (l *Logger) Add(fileSize int, compressedSize int) {
 	l.totalCompressedSize += compressedSize
 	percent := float64(l.processed) / float64(l.total) * 100
 	compress_percent := float64(l.totalCompressedSize) / float64(l.totalFileSize) * 100
-	fmt.Printf("\r压缩率 %4.2f 进度: [%-50s] %.2f%% %10s/%s", compress_percent, bar(percent, 50), percent, byteCountSI(l.totalCompressedSize), byteCountSI(l.totalFileSize))
+	fmt.Printf("\r压缩率 %5.2f 进度: [%-50s] %4.2f%% %10s/%s", compress_percent, bar(percent, 50), percent, byteCountSI(l.totalCompressedSize), byteCountSI(l.totalFileSize))
 }
 
 // bar 返回一个表示进度的字符串条
