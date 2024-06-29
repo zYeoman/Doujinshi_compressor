@@ -113,7 +113,7 @@ func encodeFiles(maxWidth uint, outputFormat string, quality float64, wg *sync.W
 		if err != nil {
 			fmt.Printf("\nfile %s format %s fail %v\n", image_info.Name, outputFormat, err)
 		}
-		outch <- BytesInfo{image_info.Name, image_info.Size, buf}
+		outch <- BytesInfo{image_info.Name + "." + outputFormat, image_info.Size, buf}
 	}
 }
 
