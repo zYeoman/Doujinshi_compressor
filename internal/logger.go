@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"fmt"
+	"github.com/dustin/go-humanize"
 	"time"
 )
 
@@ -16,17 +17,7 @@ type Logger struct {
 
 // byteCountSI 将字节数转换为KiB或MiB格式，使用国际单位制（SI）前缀
 func byteCountSI(b int) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB",
-		float64(b)/float64(div), "KM"[exp])
+	return humanize.Bytes(uint64(b))
 }
 
 func NewLogger(total int, filename string) *Logger {
