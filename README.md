@@ -1,5 +1,43 @@
 # Compressor
 
-1 image reader
-N image encoder
-1 image writer
+把目录里的图片批量缩放、重新编码，并打包成 `<目录名>.zip`，适合整理漫画 / 图集。
+
+## 构建
+
+```sh
+go build -o compressor .
+```
+
+## 用法
+
+```sh
+compressor [选项] [目录...]
+```
+
+不指定目录时，处理当前目录下的每个一级子目录（忽略隐藏目录）。
+
+## 选项
+
+- `-format` 输出格式：`webp`、`jpg`、`png` 或 `gif`（默认 `webp`）
+- `-quality` webp/jpg 的输出质量，1-100（默认 `75`）
+- `-max-width` 输出图片最大宽度，`0` 表示不缩放（默认 `1080`）
+- `-jobs` 并发编码协程数（默认 CPU 核数）
+- `-o` zip 输出目录（默认当前目录）
+
+## 示例
+
+```sh
+# 处理当前目录下的 1/ 和 2/，各自生成 1.zip、2.zip
+compressor
+
+# 指定目录、格式和输出位置
+compressor -format jpg -quality 90 -max-width 1600 -o out ./comic
+```
+
+## 行为
+
+- 图片按文件名自然排序（`1, 2, ..., 10` 而不是 `1, 10, 2`），zip 内页序与之一致。
+- 只缩小、不放大；宽度不超过 `-max-width` 的图片保持原尺寸。
+- 输出图片已经压缩过，因此用 `zip.Store` 存储，不做无用的二次压缩。
+- 单张图片解码/编码失败会跳过并报告，不会写入空条目或打断其它图片。
+- `Ctrl+C` 中断时会正确关闭 zip，保留已写入的图片。
